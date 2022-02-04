@@ -187,45 +187,7 @@ function readLicenseText(licenseFilepath, licenseContentType, format = "xml") {
  * @param {Array} pkgList Package list
  */
 const getNpmMetadata = async function (pkgList) {
-  const NPM_URL = "https://registry.npmjs.org/";
-  const cdepList = [];
-  for (const p of pkgList) {
-    try {
-      let key = p.name;
-      if (p.group && p.group !== "") {
-        let group = p.group;
-        if (!group.startsWith("@")) {
-          group = "@" + group;
-        }
-        key = group + "/" + p.name;
-      }
-      let body = {};
-      if (metadata_cache[key]) {
-        body = metadata_cache[key];
-      } else {
-        const res = await got.get(NPM_URL + key, {
-          responseType: "json",
-        });
-        body = res.body;
-        metadata_cache[key] = body;
-      }
-      p.description = body.description;
-      p.license = body.license;
-      if (body.repository && body.repository.url) {
-        p.repository = { url: body.repository.url };
-      }
-      if (body.homepage) {
-        p.homepage = { url: body.homepage };
-      }
-      cdepList.push(p);
-    } catch (err) {
-      cdepList.push(p);
-      if (DEBUG_MODE) {
-        console.error(err, p);
-      }
-    }
-  }
-  return cdepList;
+  return pkgList;
 };
 exports.getNpmMetadata = getNpmMetadata;
 
@@ -712,88 +674,9 @@ exports.guessLicenseId = guessLicenseId;
  *
  * @param {Array} pkgList Package list
  */
+
 const getMvnMetadata = async function (pkgList) {
-  const MAVEN_CENTRAL_URL = "https://repo1.maven.org/maven2/";
-  const ANDROID_MAVEN = "https://maven.google.com/";
-  const JCENTER_MAVEN = "https://jcenter.bintray.com/";
-  const cdepList = [];
-  if (!pkgList || !pkgList.length) {
-    return pkgList;
-  }
-  if (DEBUG_MODE) {
-    console.log(`About to query maven for ${pkgList.length} packages`);
-  }
-  for (const p of pkgList) {
-    // If the package already has key metadata skip querying maven
-    if (p.group && p.name && p.version && !process.env.FETCH_LICENSE) {
-      cdepList.push(p);
-      continue;
-    }
-    let urlPrefix = MAVEN_CENTRAL_URL;
-    // Ideally we should try one resolver after the other. But it increases the time taken
-    if (p.group.indexOf("android") !== -1) {
-      urlPrefix = ANDROID_MAVEN;
-    } else if (
-      p.group.indexOf("jetbrains") !== -1 ||
-      p.group.indexOf("airbnb") !== -1
-    ) {
-      urlPrefix = JCENTER_MAVEN;
-    }
-    let groupPart = p.group.replace(/\./g, "/");
-    const fullUrl =
-      urlPrefix +
-      groupPart +
-      "/" +
-      p.name +
-      "/" +
-      p.version +
-      "/" +
-      p.name +
-      "-" +
-      p.version +
-      ".pom";
-    try {
-      if (DEBUG_MODE) {
-        console.log(`Querying ${fullUrl}`);
-      }
-      const res = await got.get(fullUrl);
-      const bodyJson = convert.xml2js(res.body, {
-        compact: true,
-        spaces: 4,
-        textKey: "_",
-        attributesKey: "$",
-        commentKey: "value",
-      }).project;
-      if (bodyJson && bodyJson.licenses && bodyJson.licenses.license) {
-        if (Array.isArray(bodyJson.licenses.license)) {
-          p.license = bodyJson.licenses.license.map((l) => {
-            return findLicenseId(l.name._);
-          });
-        } else if (Object.keys(bodyJson.licenses.license).length) {
-          const l = bodyJson.licenses.license;
-          p.license = [findLicenseId(l.name._)];
-        } else {
-        }
-      }
-      p.description = bodyJson.description ? bodyJson.description._ : "";
-      if (bodyJson.scm && bodyJson.scm.url) {
-        p.repository = { url: bodyJson.scm.url._ };
-      }
-      cdepList.push(p);
-    } catch (err) {
-      if (DEBUG_MODE) {
-        console.log(
-          "Unable to find metadata for",
-          p.group,
-          p.name,
-          p.version,
-          fullUrl
-        );
-      }
-      cdepList.push(p);
-    }
-  }
-  return cdepList;
+  return pkgList;
 };
 exports.getMvnMetadata = getMvnMetadata;
 
@@ -832,72 +715,7 @@ exports.parsePyRequiresDist = parsePyRequiresDist;
  * @param {Boolean} fetchIndirectDeps Should we also fetch data about indirect dependencies from pypi
  */
 const getPyMetadata = async function (pkgList, fetchIndirectDeps) {
-  const PYPI_URL = "https://pypi.org/pypi/";
-  let cdepList = [];
-  let indirectDeps = [];
-  for (const p of pkgList) {
-    if (!p || !p.name) {
-      continue;
-    }
-    try {
-      if (p.name.includes("https")) {
-        cdepList.push(p);
-        continue;
-      }
-      // Some packages support extra modules
-      if (p.name.includes("[")) {
-        p.name = p.name.split("[")[0];
-      }
-      const res = await got.get(PYPI_URL + p.name + "/json", {
-        responseType: "json",
-      });
-      const body = res.body;
-      p.description = body.info.summary;
-      p.license = findLicenseId(body.info.license);
-      if (body.info.home_page.indexOf("git") > -1) {
-        p.repository = { url: body.info.home_page };
-      } else {
-        p.homepage = { url: body.info.home_page };
-      }
-      // Use the latest version if none specified
-      if (
-        !p.version ||
-        p.version.includes("*") ||
-        p.version.includes("<") ||
-        p.version.includes(">")
-      ) {
-        p.version = body.info.version;
-      }
-      const requires_dist = body.info.requires_dist;
-      if (requires_dist && requires_dist.length) {
-        indirectDeps = indirectDeps.concat(
-          requires_dist.map(parsePyRequiresDist)
-        );
-      }
-      if (body.releases && body.releases[p.version]) {
-        const digest = body.releases[p.version][0].digests;
-        if (digest["sha256"]) {
-          p._integrity = "sha256-" + digest["sha256"];
-        } else if (digest["md5"]) {
-          p._integrity = "md5-" + digest["md5"];
-        }
-      }
-      cdepList.push(p);
-    } catch (err) {
-      cdepList.push(p);
-      if (DEBUG_MODE) {
-        console.error(p.name, err);
-      }
-    }
-  }
-  if (indirectDeps.length && fetchIndirectDeps) {
-    if (DEBUG_MODE) {
-      console.log("Fetching metadata for indirect dependencies");
-    }
-    const extraList = await getPyMetadata(indirectDeps, false);
-    cdepList = cdepList.concat(extraList);
-  }
-  return cdepList;
+    return pkgList;
 };
 exports.getPyMetadata = getPyMetadata;
 
@@ -1099,67 +917,6 @@ exports.toGitHubUrl = toGitHubUrl;
  * @return {String} SPDX license id
  */
 const getRepoLicense = async function (repoUrl, repoMetadata) {
-  if (!repoUrl) {
-    repoUrl = toGitHubUrl(repoMetadata);
-  }
-  // Perform github lookups
-  if (repoUrl.indexOf("github.com") > -1) {
-    let apiUrl = repoUrl.replace(
-      "https://github.com",
-      "https://api.github.com/repos"
-    );
-    apiUrl += "/license";
-    const headers = {};
-    if (process.env.GITHUB_TOKEN) {
-      headers["Authorization"] = "Bearer " + process.env.GITHUB_TOKEN;
-    }
-    try {
-      const res = await got.get(apiUrl, {
-        responseType: "json",
-        headers: headers,
-      });
-      if (res && res.body) {
-        const license = res.body.license;
-        let licenseId = license.spdx_id;
-        const licObj = {
-          url: res.body.html_url,
-        };
-        if (license.spdx_id === "NOASSERTION") {
-          if (res.body.content) {
-            const content = Buffer.from(res.body.content, "base64").toString(
-              "ascii"
-            );
-            licenseId = guessLicenseId(content);
-          }
-          // If content match fails attempt to find by name
-          if (!licenseId && license.name.toLowerCase() !== "other") {
-            licenseId = findLicenseId(license.name);
-            licObj["name"] = license.name;
-          }
-        }
-        licObj["id"] = licenseId;
-        return licObj;
-      }
-    } catch (err) {
-      return undefined;
-    }
-  } else if (repoMetadata) {
-    const group = repoMetadata.group;
-    const name = repoMetadata.name;
-    if (group && name) {
-      for (let i in knownLicenses) {
-        const akLic = knownLicenses[i];
-        if (akLic.group === "." && akLic.name === name) {
-          return akLic.license;
-        } else if (
-          group.includes(akLic.group) &&
-          (akLic.name === name || akLic.name === "*")
-        ) {
-          return akLic.license;
-        }
-      }
-    }
-  }
   return undefined;
 };
 exports.getRepoLicense = getRepoLicense;
@@ -1170,45 +927,9 @@ exports.getRepoLicense = getRepoLicense;
  * @param {Object} repoMetadata Repo metadata
  */
 const getGoPkgLicense = async function (repoMetadata) {
-  const group = repoMetadata.group;
-  const name = repoMetadata.name;
-  let pkgUrlPrefix = "https://pkg.go.dev/";
-  if (group && group !== "." && group !== name) {
-    pkgUrlPrefix = pkgUrlPrefix + group + "/";
-  }
-  pkgUrlPrefix = pkgUrlPrefix + name + "?tab=licenses";
-  // Check the metadata cache first
-  if (metadata_cache[pkgUrlPrefix]) {
-    return metadata_cache[pkgUrlPrefix];
-  }
-  try {
-    const res = await got.get(pkgUrlPrefix);
-    if (res && res.body) {
-      const $ = cheerio.load(res.body);
-      let licenses = $("#LICENSE > h2").text().trim();
-      if (licenses === "") {
-        licenses = $("section.License > h2").text().trim();
-      }
-      const licenseIds = licenses.split(", ");
-      const licList = [];
-      for (var i in licenseIds) {
-        const alicense = {
-          id: licenseIds[i],
-        };
-        alicense["url"] = pkgUrlPrefix;
-        licList.push(alicense);
-      }
-      metadata_cache[pkgUrlPrefix] = licList;
-      return licList;
-    }
-  } catch (err) {
-    return undefined;
-  }
-  if (group.indexOf("github.com") > -1) {
-    return await getRepoLicense(undefined, repoMetadata);
-  }
   return undefined;
 };
+
 exports.getGoPkgLicense = getGoPkgLicense;
 
 const getGoPkgComponent = async function (group, name, version, hash) {
@@ -1509,48 +1230,7 @@ exports.parseGoVersionData = parseGoVersionData;
  * @param {*} pkgList List of packages with metadata
  */
 const getRubyGemsMetadata = async function (pkgList) {
-  const RUBYGEMS_URL = "https://rubygems.org/api/v1/versions/";
-  const rdepList = [];
-  for (const p of pkgList) {
-    try {
-      if (DEBUG_MODE) {
-        console.log(`Querying rubygems.org for ${p.name}`);
-      }
-      const res = await got.get(RUBYGEMS_URL + p.name + ".json", {
-        responseType: "json",
-      });
-      let body = res.body;
-      if (body && body.length) {
-        body = body[0];
-      }
-      p.description = body.description || body.summary || "";
-      if (body.licenses) {
-        p.license = body.licenses;
-      }
-      if (body.metadata) {
-        if (body.metadata.source_code_uri) {
-          p.repository = { url: body.metadata.source_code_uri };
-        }
-        if (body.metadata.bug_tracker_uri) {
-          p.homepage = { url: body.metadata.bug_tracker_uri };
-        }
-      }
-      if (body.sha) {
-        p._integrity = "sha256-" + body.sha;
-      }
-      // Use the latest version if none specified
-      if (!p.version) {
-        p.version = body.number;
-      }
-      rdepList.push(p);
-    } catch (err) {
-      rdepList.push(p);
-      if (DEBUG_MODE) {
-        console.error(p, err);
-      }
-    }
-  }
-  return rdepList;
+  return pkgList;
 };
 exports.getRubyGemsMetadata = getRubyGemsMetadata;
 
@@ -1649,37 +1329,9 @@ exports.parseGemfileLockData = parseGemfileLockData;
  * @param {Array} pkgList Package list
  */
 const getCratesMetadata = async function (pkgList) {
-  const CRATES_URL = "https://crates.io/api/v1/crates/";
-  const cdepList = [];
-  for (const p of pkgList) {
-    try {
-      if (DEBUG_MODE) {
-        console.log(`Querying crates.io for ${p.name}`);
-      }
-      const res = await got.get(CRATES_URL + p.name, { responseType: "json" });
-      const body = res.body.crate;
-      p.description = body.description;
-      if (res.body.versions) {
-        const licenseString = res.body.versions[0].license;
-        p.license = licenseString.split("/");
-      }
-      if (body.repository) {
-        p.repository = { url: body.repository };
-      }
-      if (body.homepage) {
-        p.homepage = { url: body.homepage };
-      }
-      // Use the latest version if none specified
-      if (!p.version) {
-        p.version = body.newest_version;
-      }
-      cdepList.push(p);
-    } catch (err) {
-      cdepList.push(p);
-    }
-  }
-  return cdepList;
+  return pkgList;
 };
+
 exports.getCratesMetadata = getCratesMetadata;
 
 const parseCargoTomlData = async function (cargoData) {
@@ -1966,59 +1618,7 @@ exports.parseCsPkgLockData = parseCsPkgLockData;
  * @param {Array} pkgList Package list
  */
 const getNugetMetadata = async function (pkgList) {
-  const NUGET_URL = "https://api.nuget.org/v3/registration3/";
-  const cdepList = [];
-  for (const p of pkgList) {
-    try {
-      if (DEBUG_MODE) {
-        console.log(`Querying nuget for ${p.name}`);
-      }
-      const res = await got.get(
-        NUGET_URL +
-          p.group.toLowerCase() +
-          (p.group !== "" ? "." : "") +
-          p.name.toLowerCase() +
-          "/index.json",
-        { responseType: "json" }
-      );
-      const items = res.body.items;
-      if (!items || !items[0] || !items[0].items) {
-        continue;
-      }
-      const firstItem = items[0];
-      const body = firstItem.items[firstItem.items.length - 1];
-      // Set the latest version in case it is missing
-      if (!p.version && body.catalogEntry.version) {
-        p.version = body.catalogEntry.version;
-      }
-      p.description = body.catalogEntry.description;
-      if (
-        body.catalogEntry.licenseExpression &&
-        body.catalogEntry.licenseExpression !== ""
-      ) {
-        p.license = findLicenseId(body.catalogEntry.licenseExpression);
-      } else if (body.catalogEntry.licenseUrl) {
-        p.license = body.catalogEntry.licenseUrl;
-      }
-      if (body.catalogEntry.projectUrl) {
-        p.repository = { url: body.catalogEntry.projectUrl };
-        p.homepage = {
-          url:
-            "https://www.nuget.org/packages/" +
-            p.group +
-            (p.group !== "" ? "." : "") +
-            p.name +
-            "/" +
-            p.version +
-            "/",
-        };
-      }
-      cdepList.push(p);
-    } catch (err) {
-      cdepList.push(p);
-    }
-  }
-  return cdepList;
+  return pkgList;
 };
 exports.getNugetMetadata = getNugetMetadata;
 
